@@ -8,3 +8,5 @@ checkpoints/
 samples*.png
 .pytest_cache/
 .ipynb_checkpoints/
+checkpoints_*/
+samples_*/

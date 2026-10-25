@@ -194,7 +194,8 @@ python train.py --stage 1 --steps 5000 --color
 python train.py --stage 2 --steps 5000 --color
 python train.py --stage 3 --steps 5000 --color
 # options: --cond {label,clip,text}, --clip-model ID_OR_PATH, --subset N, --batch-size, --lr, --ckpt-dir,
-#          --prompt / --prompt-stage{1,2,3} (text only, see "Per-stage prompts")
+#          --prompt / --prompt-stage{1,2,3} (text only, see "Per-stage prompts"),
+#          --ema-decay, --warmup-steps, --lr-schedule, --sample-every, --save-every, --resume (see "Long training runs")
 ```
 
 Sample the full cascade. Rows are stages 1..3, each shown at the final resolution:
@@ -222,6 +223,24 @@ python sample.py --ckpt-dir $T --steps 3 --num-samples 4 --prompt "a handwritten
     --prompt-s3 "a bold red handwritten seven with thick smooth strokes on a pale blue background" --out $T/samples.png
 ```
 
+### Long training runs, EMA and periodic samples
+
+All of these are **off by default**; without them `train.py` trains exactly as before (same loss history, same weights).
+
+```bash
+python train.py --stage 1 --steps 30000 --batch-size 128 --lr 2e-4 --ema-decay 0.999 --warmup-steps 500 \
+    --sample-every 5000 --save-every 5000 --ckpt-dir checkpoints_long --sample-dir samples_long
+python train.py --stage 1 --steps 30000 ... --resume      # continue from checkpoints_long/stage1.pt
+```
+
+- `--ema-decay D`: exponential moving average of the stage weights (UNet + conditioning encoder), updated after every optimiser step, with decay warmup `min(D, (1+n)/(10+n))` (`--no-ema-warmup` disables it). The checkpoint keeps the raw weights under `"state"` (unchanged) and adds the EMA weights under `"ema_state"` (same layout) plus `"ema"` metadata. Implemented in `c2f/ema.py` (`StageEMA`).
+- `--warmup-steps N`: linear LR warmup. `--lr-schedule {constant,cosine,linear}` (default `constant`) decays the LR after warmup down to `lr * --min-lr-ratio` at `--steps`.
+- `--sample-every N`: every N steps (and at the end) samples 2 images per digit 0–9 (20 images) with the EMA weights (raw weights if EMA is off), `--sample-steps` DDIM steps (default 50), a fixed noise seed (the training RNG is not affected), and saves a nearest-upscaled PNG `--sample-dir/stageK_stepNNNNNN.png` (`--sample-tile` px per image, default 64). Stage 1 is 16x16 gray. Stages 2/3 condition on the real low-res images of 20 fixed training images, shown as the top row.
+- `--save-every N`: writes the resumable checkpoint `stageK.pt` (raw + EMA weights, optimiser, step) every N steps, plus a weights-only snapshot `stageK_stepNNNNNN.pt`. `--resume [PATH]` continues from it (default `ckpt-dir/stageK.pt`). The data order after resuming is re-seeded, so a resumed run is not bit-identical to an uninterrupted one.
+- Loss log: `stageK_losses.json` (per-step losses, as before) and `stageK_log.json` (every `--log-every` steps: loss, mean loss over the last `--log-every` steps, LR, elapsed time; plus the list of sample grids). With any of these options the console line also prints the smoothed loss and the LR.
+
+Sampling with EMA weights: `sample.py` and `make_grid.py` use, **per stage**, the EMA weights if that stage's checkpoint has `"ema_state"`, otherwise the raw weights. Old checkpoints (no EMA) therefore sample exactly as before. `--use-ema` requires EMA weights (error if missing), and `--no-ema` always uses the raw weights. The script prints which weights each stage uses.
+
 ## Layout
 
 ```
@@ -232,9 +251,11 @@ c2f/cascade.py    Cascade: per-stage UNets + encoders, stage losses, full sampli
 c2f/color.py      RGB <-> YCbCr helpers
 c2f/text.py       label encoder, frozen CLIP text encoder + adapters, hashed text stub, per-stage prompt helpers
 c2f/data.py       MNIST (gray / synthetic colour)
-train.py          train one stage
+c2f/ema.py        EMA of a stage's weights; choosing EMA/raw weights from a checkpoint
+train.py          train one stage (optional EMA, LR warmup/decay, periodic samples/checkpoints, resume)
 sample.py         sample the cascade
-tests/            shape, per-stage prompt and CLIP tests (run in CI; CLIP-model tests skip offline)
+make_grid.py      8x8 sample grid + progressive per-stage figure
+tests/            shape, per-stage prompt, CLIP, EMA and sampler tests (run in CI; CLIP-model tests skip offline)
 ```
 
 ## Roadmap

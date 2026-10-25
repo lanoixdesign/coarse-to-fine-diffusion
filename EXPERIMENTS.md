@@ -69,3 +69,22 @@ Only record what was actually run and observed. No numbers that were not measure
   - **Colour is not plausible relative to the training data.** Training digits have one fixed colour per class on a near-black background. Instead, the samples have a noisy mid-grey/greenish background (dark-green speckle at stage 2, grey speckle at stage 3) and multicoloured strokes, often pink, green and yellow within the same digit. The colour does not reliably match the class palette (e.g. label 5 should be blue and comes out pink/green). The chroma stages have not converged.
   - **Noise:** strong per-pixel colour speckle at stages 2 and 3, in the background and on the strokes. Stage 3 is grainy rather than blocky. Stage 1 is visibly blocky (16x16), as expected.
 - Next steps: train longer (stage 1 first, since stage 1 sets the shape and the later stages copy it); add classifier-free guidance; check stage 2/3 on ground-truth low-res inputs to separate their errors from stage 1's; compare against gray-only stages 2/3.
+
+## 2026-10-25 — EMA, periodic samples, sampler sanity check; long stage-1 run launched (no results yet)
+
+- Code: `train.py --ema-decay` (EMA of the stage weights, decay warmup, saved as `"ema_state"`; `"state"` stays raw), `--warmup-steps`, `--lr-schedule {constant,cosine,linear}`, `--sample-every/--sample-dir/--sample-steps`, `--save-every`, `--resume`, JSON loss log `stageK_log.json`. `sample.py` / `make_grid.py`: EMA weights when the checkpoint has them, `--use-ema` / `--no-ema`. All new options default to off.
+- Backward compatibility checks (CPU): with default options, `train.py --stage 1 --steps 30 --batch-size 16 --subset 512` gives a `stage1_losses.json` byte-identical to the previous code and identical weights. `sample.py` on the old 2000-step checkpoints gives a PNG byte-identical to the previous code (raw weights, no EMA in those checkpoints).
+- Tests: `pytest -q tests`: 35 passed (27 existing + 6 in `tests/test_ema.py` + 2 in `tests/test_sampler.py`), with transformers 5.20.2 and the CLIP model cached. Without transformers: 26 passed, 9 skipped (CLIP).
+- Sampling-pipeline sanity check before the long run, on the old 2000-step stage-1 checkpoint and 256 real gray MNIST images at 16x16. **No bug found.**
+  - (a) Training targets are in [-1, 1] (min -1.0, max 1.0; background = -1). The sampler clamps x0 to [-1, 1], and `from_model_range` maps [-1, 1] to [0, 1]. The ranges match.
+  - (b) The DDIM update uses the same `alphas_cumprod[t]` as `q_sample`. Timesteps go from 999 to 0 (50 unique values), the same integer range the UNet's time embedding sees in training. With an oracle ε, each DDIM step lands on `q_sample(x0, t_next, ε)` and the output equals x0 (now a test, `tests/test_sampler.py`).
+  - (c) At sampling, label embeddings equal `encoder(labels)`. The null token (index 10) is only used by training-time condition dropout (p = 0.1). No guidance is used.
+  - (d) ε-MSE of the old checkpoint on noised real images: t=50: 0.143, t=200: 0.069, t=500: 0.012, t=800: 0.0013. Random t: 0.032 (the training loss over the last 100 steps was 0.039). With a wrong label the ε-MSE is higher (t=200: 0.091 vs 0.069 correct, 0.077 null), so the label is used, but only weakly. Denoising from t=300 with 25 DDIM steps of the sampler's update gives MSE 0.073 to the clean image, vs 0.62 for the rescaled noisy input. From t=500: 0.16 vs 1.30. The wrong shapes of the earlier stage-1 samples are therefore not explained by a range, schedule, indexing or conditioning mismatch. Old results are unaffected (no code fix was needed).
+- Run launched (stage 1 only, no results yet):
+  ```
+  OMP_NUM_THREADS=8 python train.py --stage 1 --steps 30000 --batch-size 128 --lr 2e-4 --ema-decay 0.999 \
+      --warmup-steps 500 --sample-every 5000 --save-every 5000 --ckpt-dir checkpoints_long --sample-dir samples_long
+  ```
+  Gray MNIST, label conditioning, `default_config()` (16x16 Y, base_channels 32, about 688k parameters), constant LR after warmup, EMA 0.999, sample grids with EMA weights and 50 DDIM steps every 5000 steps. Hardware: CPU, 8 threads. Measured speed: about 0.083 s/step at batch 128, so roughly 42 min for 30000 steps. Stages 2 and 3 were not retrained.
+- Results: none yet. They will be added in a later entry.
+
