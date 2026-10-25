@@ -75,13 +75,15 @@ def lr_factor(step: int, total: int, warmup: int, schedule: str, min_ratio: floa
 
 def sample_grid_inputs(model, k, dataset, per_label=2, num_classes=10):
     """Labels [0..9] * per_label, and for stage k > 0 the real stage-(k-1) images of fixed
-    training images with those labels (the conditioning for stage k)."""
+    training images with those labels (the conditioning for stage k). With a dataset that
+    returns (x, y, cond_source) (--cond-source gray), the conditioning comes from cond_source."""
     labels = torch.arange(num_classes).repeat(per_label)
     if k == 0:
         return labels, None
     found = {c: [] for c in range(num_classes)}
     for i in range(len(dataset)):
-        x, y = dataset[i]
+        item = dataset[i]
+        x, y = (item[2] if len(item) > 2 else item[0]), item[1]
         if len(found[y]) < per_label:
             found[y].append(x)
         if all(len(v) == per_label for v in found.values()):
@@ -141,6 +143,10 @@ def main():
     for s in (1, 2, 3):
         ap.add_argument(f"--prompt-stage{s}", default=None,
                         help=f"prompt template for stage {s} only (falls back to --prompt)")
+    ap.add_argument("--cond-source", choices=["target", "gray"], default="target",
+                    help="stage 2/3: image the conditioning (previous-stage target) is derived from. "
+                         "target = the training image itself (default, previous behaviour); gray = the "
+                         "grayscale rendering of the same digit, matching a stage 1 trained without --color")
     ap.add_argument("--data", default="data")
     ap.add_argument("--ckpt-dir", default="checkpoints")
     ap.add_argument("--log-every", type=int, default=50)
@@ -191,7 +197,10 @@ def main():
     opt = torch.optim.AdamW(params, lr=args.lr)
     n_params = sum(p.numel() for p in params)
     top = cfg.stages[-1].resolution
-    loader = make_loader(args.data, size=top, color=args.color, subset=args.subset or None, batch_size=args.batch_size)
+    if args.cond_source != "target" and args.stage == 1:
+        ap.error("--cond-source only applies to stages 2 and 3")
+    loader = make_loader(args.data, size=top, color=args.color, subset=args.subset or None, batch_size=args.batch_size,
+                         with_gray=args.cond_source == "gray")
     print(f"stage {args.stage}: res={cfg.stages[k].resolution} channels={cfg.stages[k].channels} "
           f"params={n_params:,} device={device}")
     if template is not None:
@@ -281,13 +290,14 @@ def main():
 
     model.train()
     while step < args.steps:
-        for x, y in loader:
-            x, y = x.to(device), y.to(device)
+        for batch in loader:
+            x, y = batch[0].to(device), batch[1].to(device)
+            extra_kw = {"cond_source": batch[2].to(device)} if len(batch) > 2 else {}
             if template is None:
-                loss = model.stage_loss(k, x, y)
+                loss = model.stage_loss(k, x, y, **extra_kw)
             else:
                 prompts = [format_prompt(template, l, COLOR_NAMES[l] if args.color else "gray") for l in y.tolist()]
-                loss = model.stage_loss(k, x, y, stage_prompts={args.stage: prompts})
+                loss = model.stage_loss(k, x, y, stage_prompts={args.stage: prompts}, **extra_kw)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             if scheduled:

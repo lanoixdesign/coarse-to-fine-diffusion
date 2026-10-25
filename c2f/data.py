@@ -20,10 +20,14 @@ COLOR_NAMES = ["red", "orange", "yellow", "green", "teal", "blue", "purple", "pi
 class C2FMNIST(Dataset):
     """Returns (ycbcr in [-1,1] at `size`, label)."""
 
-    def __init__(self, root: str = "data", train: bool = True, size: int = 64, color: bool = True, download: bool = True):
+    def __init__(self, root: str = "data", train: bool = True, size: int = 64, color: bool = True, download: bool = True,
+                 with_gray: bool = False):
+        """`with_gray=True`: items are (ycbcr, label, ycbcr_gray), where ycbcr_gray is the same digit
+        rendered in grayscale (white on black, neutral chroma), e.g. to condition stage 2 on the
+        grayscale structure that a gray-trained stage 1 produces."""
         from torchvision import datasets, transforms
         self.ds = datasets.MNIST(root, train=train, download=download, transform=transforms.ToTensor())
-        self.size, self.color = size, color
+        self.size, self.color, self.with_gray = size, color, with_gray
 
     def __len__(self):
         return len(self.ds)
@@ -38,11 +42,15 @@ class C2FMNIST(Dataset):
         else:
             rgb = img.expand(3, -1, -1)
         ycc = rgb_to_ycbcr(rgb[None])[0]
+        if self.with_gray:
+            gray = to_model_range(rgb_to_ycbcr(img.expand(3, -1, -1)[None])[0])
+            return to_model_range(ycc), label, gray
         return to_model_range(ycc), label
 
 
-def make_loader(root="data", size=64, color=True, subset=None, batch_size=64, num_workers=0, download=True):
-    ds = C2FMNIST(root, True, size, color, download)
+def make_loader(root="data", size=64, color=True, subset=None, batch_size=64, num_workers=0, download=True,
+                with_gray=False):
+    ds = C2FMNIST(root, True, size, color, download, with_gray=with_gray)
     if subset:
         ds = Subset(ds, range(min(subset, len(ds))))
     return DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True)
