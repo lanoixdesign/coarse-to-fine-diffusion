@@ -34,3 +34,12 @@ Only record what was actually run and observed. No numbers that were not measure
 - Samples: the 4×3 grid (rows = stages) is unstructured noise, which is expected after 20 steps and 5 DDIM steps. Stage 1 is grey, stages 2–3 are coloured noise.
 - Observations: every stage trains, saves a checkpoint, and the cascade chains 16 → 32 → 64 with the right shapes. The text-stub conditioning path also runs. No quality claims.
 - Next steps: train stage 1 properly (thousands of steps, ideally on GPU) and look at 16x16 samples; then stage 2 conditioned on ground-truth 16x16 inputs; compare grayscale and synthetic-colour MNIST.
+
+## 2026-10-25 — Per-stage prompts (interface change, no training results)
+
+- What: `Cascade.stage_loss` / `Cascade.sample` take an optional base `prompt` and per-stage `stage_prompts` (fallback: stage prompt → base prompt → labels). `train.py --prompt/--prompt-stage{1,2,3}`, `sample.py --prompt/--prompt-s{1,2,3}`. See README "Per-stage prompts".
+- This is an **interface change only**. No training run, no quality or metric results. The text encoder is still the hashed bag-of-words stub, so per-stage prompts only exercise the plumbing.
+- Checks run (CPU, small subset, temporary checkpoint dirs):
+  - `pytest -q tests`: 16 passed (4 existing + 12 new in `tests/test_stage_prompts.py`).
+  - The README smoke test (`train.py --stage {1,2,3} --steps 20 --batch-size 16 --subset 512 --color`, then `sample.py --steps 5 --labels 0 1 2 3`) gives loss histories identical to the previous code, and the sample PNG is byte-identical. `--cond text` without prompt flags is identical to the previous code too.
+  - Text mode with per-stage prompt templates (20 steps per stage), then `sample.py --steps 5` with `--prompt` plus `--prompt-s2/--prompt-s3`. It runs end to end. A base prompt alone gives a PNG byte-identical to the same prompt passed to every stage.

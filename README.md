@@ -14,7 +14,7 @@ Most of an image's structure (layout, shapes, edges) is in its **luminance**, an
 
 1. **Decide structure cheaply:** generate a tiny 16x16 single-channel (Y) image, with the loss on that miniature only.
 2. **Refine, then colour:** each later stage upsamples the previous output, refines luminance at a higher resolution, and adds colour channels (Cb/Cr) according to a configurable **colour schedule**.
-3. **Keep the prompt in the loop:** the same label/text conditioning is fed to **every** stage, so colour and detail decisions stay tied to the prompt.
+3. **Keep the prompt in the loop:** label/text conditioning is fed to **every** stage, so colour and detail decisions stay tied to the prompt. By default every stage sees the same prompt; optionally each stage can get **its own prompt** (see [Per-stage prompts](#per-stage-prompts)), e.g. a short global prompt for the 16x16 composition stage and a more detailed one for texture and colour in stages 2 and 3.
 
 The hope is that splitting the work this way makes each stage's job easier, and lets us study *when* colour should enter the generation process. Whether it actually helps is an open question for this repo.
 
@@ -22,9 +22,9 @@ The hope is that splitting the work this way makes each stage's job easier, and 
 
 ```mermaid
 flowchart LR
-    P["prompt / label"] --> E1["encoder (stage 1)"]
-    P --> E2["encoder (stage 2)"]
-    P --> E3["encoder (stage 3)"]
+    P1["prompt stage 1<br/>(default: base prompt / label)"] --> E1["encoder (stage 1)"]
+    P2["prompt stage 2<br/>(default: base prompt / label)"] --> E2["encoder (stage 2)"]
+    P3["prompt stage 3<br/>(default: base prompt / label)"] --> E3["encoder (stage 3)"]
     N1(["noise 1x16x16"]) --> S1["Stage 1 UNet<br/>16x16 Y"]
     E1 --> S1
     S1 -->|"upsample x2"| U1["cond 1x32x32"]
@@ -70,7 +70,73 @@ Notation: `x_0^(k)` is the target at stage *k* (that stage's channels, at its re
 - `HashTextEncoder`: a **stub** text encoder (hashed bag-of-words with a trainable `EmbeddingBag`), fed prompts like `"a handwritten digit seven"` (`--cond text`). It is *not* a language model. It only exercises the string-prompt path.
 - `PretrainedTextEncoder`: a placeholder for a frozen CLIP or T5 encoder. Its intended shape is described in the docstring, but it raises `NotImplementedError` for now.
 
-The embedding is projected and added to the timestep embedding in every residual block of **every** stage. Each stage currently owns its own small trainable encoder, so stages can be trained independently. A frozen pretrained encoder could be shared across stages.
+The embedding is projected and added to the timestep embedding in every residual block of **every** stage. Each stage currently owns its own small trainable encoder (`Cascade.encoders[k]`), so stages can be trained independently. A frozen pretrained encoder could be shared across stages.
+
+### Per-stage prompts
+
+Each stage can be conditioned on its **own** prompt, encoded separately by that stage's encoder. The intended use: a short global prompt steers the 16x16 luminance stage (composition), and a more detailed prompt steers stages 2 and 3 (texture and colour). For example:
+
+| Stage | Prompt |
+|---|---|
+| 1 (16x16 Y) | `a handwritten digit seven` (base prompt) |
+| 2 (32x32 YCbCr) | `a bold red handwritten seven with thick smooth strokes on a pale blue background` |
+| 3 (64x64 YCbCr) | `a bold red handwritten seven with thick smooth strokes on a pale blue background` |
+
+**Fallback rules** (stage numbers are 1-based):
+
+1. If stage *k* has its own prompt, that prompt is used.
+2. Otherwise the stage uses the **base prompt**.
+3. If there is no base prompt either, the stage uses the labels: the class embedding with `--cond label`, or `"a handwritten digit {name}"` with `--cond text`. This is the original behaviour.
+
+So a base prompt on its own applies to all stages. It gives exactly the same embeddings and samples (for a fixed seed) as passing that prompt to every stage. A call without any prompt arguments behaves exactly as before. Checkpoints are unchanged: the state-dict keys are the same and no parameters were added, so old checkpoints load and new ones load in old code. Condition dropout (`cond_drop_prob`) still swaps a stage's embedding for **that stage's** null embedding (`Cascade.null_embedding(k, B)`), whichever prompt the stage was given.
+
+Prompts are strings, so they need `--cond text`. With `--cond label`, passing a text prompt raises an error. In the Python API, a stage's labels can be overridden with an int or a LongTensor instead.
+
+**Command line:**
+
+```bash
+# training: each stage is trained on its own prompt template, filled per image
+# placeholders: {digit} -> "seven", {label} -> 7, {color} -> synthetic colour name with --color ("gray" otherwise)
+python train.py --stage 1 --cond text --color --prompt "a handwritten digit {digit}"
+python train.py --stage 2 --cond text --color --prompt-stage2 "a bold {color} handwritten {digit} with thick smooth strokes"
+python train.py --stage 3 --cond text --color --prompt-stage3 "a bold {color} handwritten {digit} with thick smooth strokes"
+# stage K uses --prompt-stageK, else --prompt, else the default "a handwritten digit {digit}"
+
+# sampling: --prompt is the base prompt, --prompt-s1/-s2/-s3 override single stages
+python sample.py --steps 50 --num-samples 4 \
+    --prompt "a handwritten digit seven" \
+    --prompt-s2 "a bold red handwritten seven with thick smooth strokes on a pale blue background" \
+    --prompt-s3 "a bold red handwritten seven with thick smooth strokes on a pale blue background"
+# with --labels, one sample per label; prompts may use {digit}/{label}/{color}, missing ones fall back as above
+python sample.py --labels 0 1 2 3 --prompt-s2 "a bold {color} handwritten {digit} with thick smooth strokes"
+```
+
+**Python API:**
+
+```python
+from c2f import Cascade
+
+model = Cascade(cfg)                     # cfg.cond_type = "text"
+base = "a handwritten digit seven"
+detail = "a bold red handwritten seven with thick smooth strokes on a pale blue background"
+
+# sampling: dict keyed by 1-based stage number, or a per-stage list [s1, s2, s3] (None = fall back)
+outs = model.sample(prompt=base, stage_prompts={2: detail, 3: detail}, num_samples=4, steps=50)
+outs = model.sample(stage_prompts=[base, detail, detail], num_samples=4)
+outs = model.sample(prompt=base, num_samples=4)          # base prompt on every stage
+outs = model.sample(labels)                              # original call, unchanged
+
+# training: each prompt is a str (broadcast to the batch) or a list of B strings
+loss = model.stage_loss(k, x, labels, stage_prompts={k + 1: prompts_for_batch})
+loss = model.stage_loss(k, x, labels)                    # original call, unchanged
+
+# inspect what a stage receives and its embedding
+model.stage_condition(1, prompt=base, stage_prompts={2: detail}, batch=4)  # -> stage-2 prompts
+model.encode_stage(1, prompt=base, stage_prompts={2: detail}, batch=4)     # -> (4, cond_dim)
+model.null_embedding(1, 4)                                                  # unconditional embedding
+```
+
+> **Caveat:** with the stub `HashTextEncoder`, a per-stage prompt only changes that stage's embedding (a bag of hashed words). It does not carry real meaning, and a stage only responds to wording it was trained on. Until a real CLIP or T5 encoder is plugged in, per-stage prompts test the **plumbing**, not semantic control. No quality results exist for this feature.
 
 ## Data
 
@@ -94,7 +160,8 @@ Train each stage independently. MNIST is downloaded to `./data` on first use, an
 python train.py --stage 1 --steps 5000 --color
 python train.py --stage 2 --steps 5000 --color
 python train.py --stage 3 --steps 5000 --color
-# options: --cond text, --subset N, --batch-size, --lr, --ckpt-dir
+# options: --cond text, --subset N, --batch-size, --lr, --ckpt-dir,
+#          --prompt / --prompt-stage{1,2,3} (text only, see "Per-stage prompts")
 ```
 
 Sample the full cascade. Rows are stages 1..3, each shown at the final resolution:
@@ -118,11 +185,11 @@ c2f/unet.py       small time+condition UNet with configurable in/out channels
 c2f/diffusion.py  linear-beta DDPM, weighted ε-MSE loss, DDIM sampler
 c2f/cascade.py    Cascade: per-stage UNets + encoders, stage losses, full sampling
 c2f/color.py      RGB <-> YCbCr helpers
-c2f/text.py       label encoder, hashed text stub, CLIP/T5 placeholder
+c2f/text.py       label encoder, hashed text stub, CLIP/T5 placeholder, per-stage prompt helpers
 c2f/data.py       MNIST (gray / synthetic colour)
 train.py          train one stage
 sample.py         sample the cascade
-tests/            shape tests (run in CI)
+tests/            shape tests + per-stage prompt tests (run in CI)
 ```
 
 ## Roadmap
@@ -132,6 +199,7 @@ tests/            shape tests (run in CI)
 - [ ] Lab colour space option; alternative colour schedules (e.g. chroma only at the last stage)
 - [ ] Cross-stage consistency loss and perceptual loss
 - [ ] Plug in a frozen CLIP or T5 text encoder
+- [x] Per-stage prompts (interface only; needs a real text encoder to be meaningful)
 - [ ] Richer datasets: CelebA / FFHQ (faces), landscapes
 - [ ] Compare against a single-stage 64x64 colour baseline at equal compute
 - [ ] Optional joint fine-tuning of all stages
