@@ -59,7 +59,7 @@ Notation: `x_0^(k)` is the target at stage *k* (that stage's channels, at its re
 - **Stage k > 1:** conditional noise-prediction MSE, conditioned on the upsampled previous-stage image `z = Up(x_0^(k−1)) + σ_aug·n` (ground truth during training, the model's own sample at inference), with per-channel weights:
   `L_k = Σ_ch w_ch · E || ε_ch − ε_θ,ch([x_t^(k), z], t, c) ||² / Σ_ch w_ch`, where `w_Y = 1` and `w_Cb = w_Cr = chroma_weight`.
   `σ_aug` (`cond_noise_std`) is Gaussian conditioning augmentation, following Cascaded Diffusion Models, which reduces the train/test mismatch between ground-truth and sampled conditioning.
-- **Condition dropout:** the prompt embedding is replaced by a learned null embedding with probability `cond_drop_prob` (default 0.1), so classifier-free guidance can be added later. Guidance is not implemented yet.
+- **Condition dropout:** the prompt embedding is replaced by a learned null embedding with probability `cond_drop_prob` (default 0.1). This trains the unconditional branch that classifier-free guidance uses at sampling time (see [Classifier-free guidance](#classifier-free-guidance)).
 - **Future work (not implemented):** perceptual losses (e.g. LPIPS) on decoded RGB; a cross-stage consistency term, e.g. `|| Down(x̂_0^(k)) − x^(k−1) ||` so a stage cannot contradict the lower-resolution structure it was given; and a colorfulness/chroma-distribution term.
 
 ## Conditioning
@@ -241,12 +241,32 @@ python train.py --stage 1 --steps 30000 ... --resume      # continue from checkp
 
 Sampling with EMA weights: `sample.py` and `make_grid.py` use, **per stage**, the EMA weights if that stage's checkpoint has `"ema_state"`, otherwise the raw weights. Old checkpoints (no EMA) therefore sample exactly as before. `--use-ema` requires EMA weights (error if missing), and `--no-ema` always uses the raw weights. The script prints which weights each stage uses.
 
+### Classifier-free guidance
+
+`Diffusion.sample` / `Cascade.sample` implement classifier-free guidance (Ho & Salimans 2022): `eps = eps_u + w * (eps_c - eps_u)`, with `eps_u` from the stage's null embedding (the one condition dropout trains). The conditional and unconditional branches run in one batched forward pass. `w = 1` is the plain conditional model (no extra pass), `w = 0` is unconditional.
+
+```bash
+python sample.py --ckpt-dir checkpoints_long --labels 0 1 2 3 4 5 6 7 8 9          # default scales
+python sample.py ... --guidance 2                 # same scale for every stage
+python sample.py ... --guidance-s1 1.5 --guidance-s2 1 --guidance-s3 1   # per stage
+python sample.py ... --guidance 1 --no-rederive-eps                       # the original sampler, exactly
+```
+
+- **Default scales:** `c2f.config.DEFAULT_GUIDANCE = (1.5, 1.0, 1.0)` (stage 1, 2, 3), used by `sample.py` and `make_grid.py`. Stage 1's 1.5 comes from the sweep in [EXPERIMENTS.md](EXPERIMENTS.md) (2026-10-25, "Classifier-free guidance sweep"). Stages 2 and 3 were not tuned, so they use no guidance.
+- **Re-derived ε after clamping (default on):** the DDIM step clamps the predicted `x0` to [-1, 1]. With `rederive_eps=True` (default in `Cascade.sample`, `sample.py`, `make_grid.py`), ε is then recomputed from the clamped `x0`, as GLIDE / diffusers' DDIM do. **Guidance does not work without it here:** with the original update, w = 1.5 already broke most "1"s into other shapes, and w ≥ 3 gave near-chance legibility (numbers in EXPERIMENTS.md). Without guidance it changes little (slightly better in the sweep). `--no-rederive-eps` restores the original update; `Diffusion.sample` keeps `rederive_eps=False` as its own default, and `train.py`'s periodic sample grids still use the original sampler with w = 1, so those grids stay comparable across runs.
+- Guidance only makes sense for checkpoints trained with condition dropout (`cond_drop_prob > 0`, the default since the first version, so every checkpoint in this repo has it).
+- Cost: one guided DDIM step costs one forward pass over a doubled batch.
+
+### Stage-2 conditioning source (`--cond-source`)
+
+`train.py --stage 2 --color --cond-source gray` conditions stage 2 on the **grayscale** rendering of each digit (white strokes, neutral chroma) instead of the luminance of the coloured image, while the target stays the coloured image. Use it when stage 1 was trained on grayscale MNIST (no `--color`), as in `checkpoints_long`: at inference stage 2 receives stage 1's grayscale output, so this removes a train/test mismatch (coloured digits have a much darker Y than white ones, e.g. Y ≈ 0.36 for the blue 5). Default `--cond-source target` = previous behaviour. Stage 3 conditions on stage 2's YCbCr output as before.
+
 ## Layout
 
 ```
 c2f/config.py     StageConfig / CascadeConfig, colour schedule
 c2f/unet.py       small time+condition UNet with configurable in/out channels
-c2f/diffusion.py  linear-beta DDPM, weighted ε-MSE loss, DDIM sampler
+c2f/diffusion.py  linear-beta DDPM, weighted ε-MSE loss, DDIM sampler with classifier-free guidance
 c2f/cascade.py    Cascade: per-stage UNets + encoders, stage losses, full sampling
 c2f/color.py      RGB <-> YCbCr helpers
 c2f/text.py       label encoder, frozen CLIP text encoder + adapters, hashed text stub, per-stage prompt helpers
@@ -255,13 +275,15 @@ c2f/ema.py        EMA of a stage's weights; choosing EMA/raw weights from a chec
 train.py          train one stage (optional EMA, LR warmup/decay, periodic samples/checkpoints, resume)
 sample.py         sample the cascade
 make_grid.py      8x8 sample grid + progressive per-stage figure
-tests/            shape, per-stage prompt, CLIP, EMA and sampler tests (run in CI; CLIP-model tests skip offline)
+tests/            shape, per-stage prompt, CLIP, EMA, sampler and guidance tests (run in CI; CLIP-model tests skip offline)
+tools/            16x16 MNIST classifier (proxy metric) and the guidance sweep (tools/cfg_eval.py)
+run_stage23.sh    resumable CPU run of stages 2 and 3 used for checkpoints_long
 ```
 
 ## Roadmap
 
-- [ ] Real training runs on MNIST (gray and synthetic colour) with logged curves and samples
-- [ ] Classifier-free guidance at sampling time
+- [ ] Real training runs on MNIST (gray and synthetic colour) with logged curves and samples (stage 1: 30k steps done; stages 2/3: running, see EXPERIMENTS.md)
+- [x] Classifier-free guidance at sampling time (stage 1 tuned: w = 1.5; stages 2/3 not tuned yet)
 - [ ] Lab colour space option; alternative colour schedules (e.g. chroma only at the last stage)
 - [ ] Cross-stage consistency loss and perceptual loss
 - [x] Plug in a frozen CLIP text encoder (`--cond clip`; plumbing tested, no training results yet)
@@ -273,7 +295,7 @@ tests/            shape, per-stage prompt, CLIP, EMA and sampler tests (run in C
 
 ## Limitations (honest)
 
-- This is a **prototype**. Only a smoke test has been run: a few steps per stage, which produces noise. There are **no results, metrics, or quality claims**.
+- This is a **prototype**. The only metric so far is a proxy: the recognition rate of generated 16x16 stage-1 digits by a separately trained small MNIST classifier, plus a Fréchet distance on that classifier's features (EXPERIMENTS.md). That measures legibility of the conditioned digit, not image quality, and there are **no benchmark claims**.
 - The UNets are tiny (about 0.7M parameters per stage) and have no attention layers.
 - Text conditioning now uses a real frozen CLIP encoder (`--cond clip`), but nothing has been trained with it beyond a few-step smoke test. MNIST prompts are templated from the labels, so they carry no more information than the labels. The stub (`--cond text`) remains for offline use.
 - Synthetic colourisation is trivially predictable from the label, so it tests the plumbing, not real colourisation ability.

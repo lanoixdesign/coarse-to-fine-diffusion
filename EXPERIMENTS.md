@@ -88,3 +88,68 @@ Only record what was actually run and observed. No numbers that were not measure
   Gray MNIST, label conditioning, `default_config()` (16x16 Y, base_channels 32, about 688k parameters), constant LR after warmup, EMA 0.999, sample grids with EMA weights and 50 DDIM steps every 5000 steps. Hardware: CPU, 8 threads. Measured speed: about 0.083 s/step at batch 128, so roughly 42 min for 30000 steps. Stages 2 and 3 were not retrained.
 - Results: none yet. They will be added in a later entry.
 
+
+## 2026-10-25 — Long stage-1 run: results (30000 steps, EMA)
+
+- Run: the command in the previous entry, completed. 30000 steps in 2663 s (about 44 min, about 0.089 s/step at batch 128, CPU, 8 threads). Mean training loss over the last 1000 steps: 0.0286 (last 100: 0.0288); it was still drifting down slowly (about 0.033 around step 5000, 0.030 around 15000).
+- Samples: `samples_long/stage1_step{005000..030000}.png` (EMA, 50 DDIM steps, no guidance, same noise seed for every grid). At 30000 steps most digits are legible. By eye, defects in the 10x2 grid: both 4s (top one like an "A", bottom one like a "y"), the top 3 (looks like a 9), the top 5 and the bottom 6 are malformed.
+
+## 2026-10-25 — Classifier-free guidance sweep on stage 1 (no retraining)
+
+- Code: classifier-free guidance in `Diffusion.sample` / `Cascade.sample` (`guidance_scale`, `null_emb`; one batched forward pass for both branches), `sample.py` / `make_grid.py --guidance / --guidance-sK`, optional `rederive_eps`, `c2f.config.DEFAULT_GUIDANCE`. New tests in `tests/test_guidance.py` (w = 1 is identical to the unguided sampler; w = 0 equals sampling with the null embedding; the guidance formula; per-stage scales). `pytest -q tests` in `/workspace/venv-c2f` (no transformers): 31 passed, 9 skipped (CLIP).
+- Prerequisite checked: the checkpoint's config has `cond_drop_prob = 0.1`, and `Cascade.stage_loss` replaces the label embedding by the learned null token (index 10) with that probability during training, so the unconditional branch exists. Sanity check: with w = 0 (unconditional only) and the original sampler, 2000 samples look like digits of all classes but match the requested label only 10.9 % of the time (chance level), so the null token was learned as "any digit".
+- Proxy metric: `tools/mnist16_classifier.py`, a small CNN (3 conv layers + MLP) trained for 4 epochs (about 50 s CPU) on MNIST preprocessed **exactly** like the stage-1 target (bilinear 64x64, area 16x16, [-1, 1]; checked equal to `C2FMNIST` + `stage_target` within 5e-7), with ±1 px shift augmentation. Test accuracy on real 16x16 MNIST: 99.36 %. Saved as `checkpoints_long/mnist16_classifier.pt`.
+- Sweep: `tools/cfg_eval.py`, stage-1 EMA weights. Per setting: 1000 samples (100 per digit, noise seed 2026, identical across settings), plus a 10x2 grid (seed 1234, identical to the training-time grid: the w = 1 / original-sampler grid is byte-identical to `samples_long/stage1_step030000.png`) and a 10x5 grid (seed 1235, columns = digits 0..9). Metrics: **accuracy** = share of samples the classifier assigns to the requested digit (a *legibility proxy*, not a quality measure); mean classifier probability of the requested digit; intra-class diversity (mean pairwise L2 distance between samples of the same digit, in [-1, 1] pixels; real test digits: 7.92); **FD** = Fréchet distance between the classifier's 256-d penultimate features of the samples and of 1000 real test digits (100 per class); lower = closer to the real distribution. With 1000 samples FD has a noticeable sampling error, so only differences of several units mean anything. One seed only.
+- Commands:
+  ```
+  OMP_NUM_THREADS=8 python tools/mnist16_classifier.py
+  OMP_NUM_THREADS=8 python tools/cfg_eval.py --scales 1 1.5 2 3 4 6 --steps 50 --rederive 0 1 --per-class 100 \
+      --out-dir samples_long/cfg_sweep --json-name sweep_ddim50.json
+  OMP_NUM_THREADS=8 python tools/cfg_eval.py --scales 1 1.5 2 --steps 100 250 --rederive 1 --per-class 100 \
+      --out-dir samples_long/cfg_sweep --json-name sweep_ddim100_250.json
+  ```
+- Results (`samples_long/cfg_sweep/sweep_*.json`; "re-derive ε" = recompute ε from the clamped x0 at each DDIM step; time = sampling 1000 samples, CPU 8 threads):
+
+  | w | DDIM steps | re-derive ε | accuracy | p(label) | intra-class div. | FD | time (s) |
+  |---|---|---|---|---|---|---|---|
+  | 1 | 50 | no (original sampler) | 96.7 % | 0.960 | 8.07 | 22.7 | 8.9 |
+  | 1.5 | 50 | no | 82.1 % | 0.817 | 8.87 | 105.3 | 24.9 |
+  | 2 | 50 | no | 49.1 % | 0.483 | 9.89 | 346.5 | 22.8 |
+  | 3 | 50 | no | 15.3 % | 0.146 | 10.20 | 568.0 | 27.0 |
+  | 4 | 50 | no | 9.9 % | 0.096 | 9.81 | 639.9 | 22.6 |
+  | 6 | 50 | no | 8.1 % | 0.080 | 9.16 | 799.5 | 23.1 |
+  | 1 | 50 | yes | 97.1 % | 0.964 | 8.00 | 20.1 | 8.6 |
+  | **1.5** | **50** | **yes** | **99.8 %** | **0.998** | **7.77** | **32.5** | 22.4 |
+  | 2 | 50 | yes | 100.0 % | 1.000 | 7.68 | 50.7 | 23.0 |
+  | 3 | 50 | yes | 100.0 % | 1.000 | 7.66 | 74.4 | 22.1 |
+  | 4 | 50 | yes | 100.0 % | 1.000 | 7.69 | 88.3 | 21.8 |
+  | 6 | 50 | yes | 100.0 % | 1.000 | 7.85 | 99.8 | 21.4 |
+  | 1 | 100 | yes | 96.8 % | 0.962 | 8.09 | 20.2 | 18.4 |
+  | 1.5 | 100 | yes | 99.8 % | 0.997 | 7.85 | 31.1 | 42.6 |
+  | 2 | 100 | yes | 100.0 % | 1.000 | 7.76 | 48.7 | 47.7 |
+  | 1 | 250 | yes | 96.7 % | 0.960 | 8.13 | 20.4 | 40.2 |
+  | 1.5 | 250 | yes | 99.8 % | 0.997 | 7.89 | 30.2 | 109.5 |
+  | 2 | 250 | yes | 100.0 % | 1.000 | 7.80 | 47.4 | 106.5 |
+
+- Observations:
+  - **With the original DDIM update, guidance makes things worse, fast.** At w = 1.5 almost every "1" turns into another shape (per-digit accuracy for 1: 3 %), and from w = 3 on the samples are thick scribbles, mostly unreadable (`grid10x5_w3_ddim50.png`). Cause: the sampler clamps the predicted x0 to [-1, 1] but kept the network's ε for the DDIM direction term. Guidance makes ε larger, so on the mostly black (-1) background x0 is clamped heavily, and the leftover ε is put back into x_t as spurious strokes. Recomputing ε from the clamped x0 (the GLIDE / diffusers DDIM convention) fixes this. It is now the default in `Cascade.sample`, `sample.py` and `make_grid.py` (`--no-rederive-eps` restores the original update).
+  - **With re-derived ε, guidance works as expected.** Legibility goes from 97.1 % (w = 1) to 99.8 % (w = 1.5) and 100 % (w ≥ 2). The FD to real digits grows with w (20 → 33 → 51 → 74 → 100) and intra-class diversity drops slightly below the real value (7.92 → 7.77 at w = 1.5): the usual fidelity/diversity trade-off. Strokes get bolder and more "typical" as w grows (by eye).
+  - **By eye on the fixed 10x2 grid** (`grid10x2_*`): w = 1.5 fixes the top 3 (now a clear 3) and the top 5, and the bottom 6 is cleaner. The two 4s are **still malformed** at every scale tried, including w = 6: the top one stays open like an "A", the bottom one like a "y". Guidance makes the shape bolder but does not change the topology those noise seeds lead to. The 10x5 grids at w = 1.5–2 show almost no broken digits.
+  - **More DDIM steps do not help:** 100 and 250 steps give the same accuracy as 50, and FD within noise (32.5 / 31.1 / 30.2 at w = 1.5), for 2x / 5x the time.
+  - Re-derived ε also helps slightly without guidance (w = 1: FD 22.7 → 20.1, accuracy 96.7 → 97.1 %; within noise).
+- **Choice: w = 1.5, 50 DDIM steps, re-derived ε** for stage 1, now the default (`c2f.config.DEFAULT_GUIDANCE = (1.5, 1.0, 1.0)`). Rationale: almost all the legibility gain (2 misrecognised digits out of 1000 instead of 29) for the smallest shift away from the real distribution (FD 32.5 vs 50.7 at w = 2). Use `--guidance-s1 2` for maximal legibility at the cost of diversity. Stages 2/3 keep w = 1 until they are tuned. No fine-tuning with condition dropout was needed, since the checkpoint already had it.
+- PNGs: `samples_long/cfg_sweep/grid10x2_w{W}_ddim{N}[_rederive].png`, `grid10x5_...png`, side-by-side `montage_10x5_ddim{N}[_rederive].png`.
+
+## 2026-10-25 — Stages 2 and 3, long CPU run (launched; results pending)
+
+- Script: `run_stage23.sh` (resumable: re-run it after an interruption; a finished stage leaves `checkpoints_long/stageK.done`, an unfinished one resumes from `checkpoints_long/stageK.pt`). Log: `/workspace/c2f_stage23.log`. After stage 3 it runs `make_grid.py --ckpt-dir checkpoints_long --steps 50 --out-dir samples_long/cascade` with the default guidance.
+  ```
+  S2_STEPS=25000 S3_STEPS=6000 BS=128 nohup setsid ./run_stage23.sh >> /workspace/c2f_stage23.log 2>&1 &
+  # per stage: python train.py --stage K --steps N --batch-size 128 --lr 2e-4 --ema-decay 0.999 --warmup-steps 500 \
+  #   --lr-schedule cosine --min-lr-ratio 0.1 --color --cond label --ckpt-dir checkpoints_long --sample-dir samples_long \
+  #   --sample-steps 50 --sample-every N/5 --save-every N/10   (+ --cond-source gray for stage 2)
+  ```
+- Same conditioning as stage 1 (`--cond label`, no prompts), synthetic-colour MNIST (`--color`) as in the 2000-step run, EMA 0.999. A cosine LR decay (to 0.1x) replaces stage 1's constant LR, because the step budget is short.
+- Stage 2 uses `--cond-source gray` (new): its conditioning is the grayscale 16x16 rendering of the digit, which is what the gray-trained stage 1 produces at inference. The target is still the coloured 32x32 YCbCr image. Without it, stage 2 would be trained on the dark luminance of coloured digits (e.g. Y ≈ 0.36 for the blue 5) and tested on white strokes. This was not A/B-tested (no budget); it is a design fix for a known mismatch.
+- Measured speed (CPU, 8 threads, batch 128, 60-step timing runs, nothing else running): stage 2 about 0.31 s/step, stage 3 about 1.47 s/step. In the real run stage 2 logged about 0.27–0.30 s/step at the start. Budget: 25000 steps for stage 2 (about 1.9–2.1 h) and 6000 steps for stage 3 (about 2.5 h).
+- Results: none yet.
