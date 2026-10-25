@@ -8,6 +8,7 @@ from .text import (LabelEncoder, HashTextEncoder, CLIPTextEncoder, CLIPTextBackb
                    DEFAULT_CLIP_MODEL, load_clip_backbone, build_encoder, labels_to_prompts,
                    normalize_stage_prompts, format_prompt)
 from .cascade import Cascade, build_condition
+from .ema import StageEMA, stage_state_from_checkpoint
 
 __all__ = [
     "CascadeConfig", "StageConfig", "default_config",
@@ -15,5 +16,5 @@ __all__ = [
     "LabelEncoder", "HashTextEncoder", "CLIPTextEncoder", "CLIPTextBackbone", "CLIPUnavailableError",
     "DEFAULT_CLIP_MODEL", "load_clip_backbone", "build_encoder", "labels_to_prompts",
     "normalize_stage_prompts", "format_prompt",
-    "Cascade", "build_condition",
+    "Cascade", "build_condition", "StageEMA", "stage_state_from_checkpoint",
 ]
