@@ -3,12 +3,16 @@
   python train.py --stage 1 --steps 2000
   python train.py --stage 2 --steps 2000 --color
 
-Per-stage prompts (text conditioning only, `--cond text`). Prompts are
+Text conditioning: `--cond clip` (frozen CLIP text encoder, downloaded from the
+Hugging Face Hub on first use; `--clip-model` picks the model id or a local path)
+or `--cond text` (alias `stub`: hashed bag-of-words stub, offline, no download).
+
+Per-stage prompts (text conditioning only). Prompts are
 templates filled per training image: {digit} -> "seven", {label} -> 7,
 {color} -> the synthetic colour name with --color ("gray" without it).
 
-  python train.py --stage 1 --cond text --color --prompt "a handwritten digit {digit}"
-  python train.py --stage 2 --cond text --color \
+  python train.py --stage 1 --cond clip --color --prompt "a handwritten digit {digit}"
+  python train.py --stage 2 --cond clip --color \
       --prompt-stage2 "a {color} handwritten {digit} with thick smooth strokes"
 
 Fallback: stage K uses --prompt-stageK, else --prompt, else the default
@@ -17,11 +21,13 @@ Fallback: stage K uses --prompt-stageK, else --prompt, else the default
 import argparse
 import json
 import os
+import sys
 import time
 
 import torch
 
-from c2f import Cascade, default_config, format_prompt
+from c2f import CLIPUnavailableError, DEFAULT_CLIP_MODEL, Cascade, default_config, format_prompt, load_clip_backbone
+from c2f.text import encoder_info
 from c2f.data import COLOR_NAMES, make_loader
 
 
@@ -38,9 +44,13 @@ def main():
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--subset", type=int, default=0, help="use only the first N MNIST images (0 = all)")
     ap.add_argument("--color", action="store_true", help="synthetic-colourised MNIST (else grayscale; chroma = neutral)")
-    ap.add_argument("--cond", choices=["label", "text"], default="label")
+    ap.add_argument("--cond", choices=["label", "clip", "text", "stub"], default="label",
+                    help="label: MNIST class embedding; clip: frozen CLIP text encoder + per-stage adapter "
+                         "(recommended for text prompts); text/stub: offline hashed bag-of-words stub")
+    ap.add_argument("--clip-model", default=DEFAULT_CLIP_MODEL,
+                    help="Hugging Face model id or local directory of the CLIP text model (--cond clip)")
     ap.add_argument("--prompt", default=None,
-                    help="base prompt template for every stage (--cond text); placeholders {digit} {label} {color}")
+                    help="base prompt template for every stage (--cond clip/text); placeholders {digit} {label} {color}")
     for s in (1, 2, 3):
         ap.add_argument(f"--prompt-stage{s}", default=None,
                         help=f"prompt template for stage {s} only (falls back to --prompt)")
@@ -49,16 +59,28 @@ def main():
     ap.add_argument("--log-every", type=int, default=50)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
+    if args.cond == "stub":
+        args.cond = "text"
 
     template = prompt_template(args, args.stage)
     if args.cond == "label" and (args.prompt or any(getattr(args, f"prompt_stage{s}") for s in (1, 2, 3))):
-        ap.error("--prompt/--prompt-stageN need --cond text (label conditioning uses the MNIST labels)")
+        ap.error("--prompt/--prompt-stageN need --cond clip or --cond text (label conditioning uses the MNIST labels)")
 
     torch.manual_seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     cfg = default_config()
     cfg.cond_type = args.cond
-    model = Cascade(cfg).to(device)
+    backbone = None
+    if args.cond == "clip":
+        cfg.clip_model = args.clip_model
+        t_load = time.time()
+        try:
+            backbone = load_clip_backbone(args.clip_model)
+        except CLIPUnavailableError as e:
+            sys.exit(f"error: {e}")
+        print(f"loaded frozen CLIP text encoder {args.clip_model!r} ({backbone.out_dim}-d, "
+              f"{time.time() - t_load:.1f}s); only the stage-{args.stage} adapter is trained")
+    model = Cascade(cfg, text_backbone=backbone).to(device)
     k = args.stage - 1
     params = list(model.stages[k].parameters()) + list(model.encoders[k].parameters())
     opt = torch.optim.AdamW(params, lr=args.lr)
@@ -94,9 +116,12 @@ def main():
     os.makedirs(args.ckpt_dir, exist_ok=True)
     path = os.path.join(args.ckpt_dir, f"stage{args.stage}.pt")
     torch.save({"config": cfg.to_dict(), "stage": args.stage, "state": model.stage_state(k),
-                "args": vars(args), "prompt_template": template}, path)
+                "args": vars(args), "prompt_template": template, "encoder": encoder_info(cfg)}, path)
     with open(os.path.join(args.ckpt_dir, f"stage{args.stage}_losses.json"), "w") as f:
         json.dump(losses, f)
+    if backbone is not None:
+        info = backbone.cache_info()
+        print(f"CLIP cache: {info['entries']} unique prompts, {info['forward_passes']} CLIP forward passes")
     print(f"saved {path}")
 
 

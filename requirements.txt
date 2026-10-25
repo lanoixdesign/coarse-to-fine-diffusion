@@ -1,3 +1,9 @@
+# CPU-only torch is assumed (CI and the smoke tests run on CPU). Install the CPU wheels first:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# or a CUDA build of your choice; `pip install -r requirements.txt` then keeps it.
 torch>=2.1
 torchvision>=0.16
 pytest>=7
+# CLIP text encoder for `--cond clip` (tested with 4.46.3 and 5.20.2). Optional for
+# `--cond label` / `--cond text` (stub), which work without it.
+transformers>=4.46

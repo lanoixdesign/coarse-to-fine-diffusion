@@ -2,7 +2,9 @@
 
   python sample.py --labels 0 1 2 3 4 5 6 7 8 9 --steps 50 --out samples.png
 
-Per-stage prompts (checkpoints trained with --cond text):
+Per-stage prompts (checkpoints trained with --cond clip or --cond text). The encoder
+type and CLIP model id are read from the checkpoint; with CLIP the frozen text
+model is loaded on startup (--clip-model overrides the id, e.g. a local path):
 
   python sample.py --steps 50 --num-samples 4 \
       --prompt "a handwritten digit seven" \
@@ -15,12 +17,14 @@ With --labels, prompts may use the placeholders {digit}, {label} and {color}.
 """
 import argparse
 import os
+import sys
 
 import torch
 import torch.nn.functional as F
 from torchvision.utils import save_image
 
-from c2f import Cascade, CascadeConfig, format_prompt, ycbcr_to_rgb
+from c2f import CLIPUnavailableError, Cascade, CascadeConfig, format_prompt, load_clip_backbone, ycbcr_to_rgb
+from c2f.text import DEFAULT_CLIP_MODEL
 from c2f.cascade import to_ycbcr3
 from c2f.color import from_model_range
 from c2f.data import COLOR_NAMES
@@ -39,6 +43,9 @@ def main():
     ap.add_argument("--steps", type=int, default=50, help="DDIM steps per stage")
     ap.add_argument("--out", default="samples.png")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--clip-model", default=None,
+                    help="override the CLIP model id/path stored in the checkpoint (--cond clip checkpoints), "
+                         "e.g. a local directory for offline use")
     args = ap.parse_args()
 
     stage_args = {s: getattr(args, f"prompt_s{s}") for s in (1, 2, 3)}
@@ -49,9 +56,22 @@ def main():
     torch.manual_seed(args.seed)
     first = torch.load(os.path.join(args.ckpt_dir, "stage1.pt"), map_location="cpu")
     cfg = CascadeConfig.from_dict(first["config"])
-    if any_prompt and cfg.cond_type != "text":
-        ap.error(f"--prompt/--prompt-sN need checkpoints trained with --cond text (these use {cfg.cond_type!r})")
-    model = Cascade(cfg)
+    if any_prompt and cfg.cond_type == "label":
+        ap.error(f"--prompt/--prompt-sN need checkpoints trained with --cond clip or --cond text "
+                 f"(these use {cfg.cond_type!r})")
+    backbone = None
+    if cfg.cond_type == "clip":
+        if args.clip_model:
+            cfg.clip_model = args.clip_model
+        model_id = cfg.clip_model or DEFAULT_CLIP_MODEL
+        try:
+            backbone = load_clip_backbone(model_id)
+        except CLIPUnavailableError as e:
+            sys.exit(f"error: these checkpoints use CLIP text conditioning. {e}")
+        print(f"encoder: frozen CLIP {model_id!r} + per-stage adapters (from checkpoint)")
+    else:
+        print(f"encoder: {cfg.cond_type}")
+    model = Cascade(cfg, text_backbone=backbone)
     n = 0
     for k in range(len(cfg.stages)):
         path = os.path.join(args.ckpt_dir, f"stage{k + 1}.pt")
