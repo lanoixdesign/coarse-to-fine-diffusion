@@ -15,7 +15,8 @@ import torch.nn.functional as F
 
 from .config import ALL_CHANNELS, CascadeConfig, StageConfig
 from .diffusion import Diffusion
-from .text import broadcast_cond, build_encoder, labels_to_prompts, normalize_stage_prompts
+from .text import (broadcast_cond, build_encoder, labels_to_prompts, load_clip_backbone,
+                   normalize_stage_prompts)
 from .unet import UNet
 
 
@@ -47,12 +48,18 @@ def stage_target(ycc: torch.Tensor, stage: StageConfig) -> torch.Tensor:
 
 
 class Cascade(nn.Module):
-    def __init__(self, cfg: CascadeConfig):
+    def __init__(self, cfg: CascadeConfig, text_backbone=None):
+        """`text_backbone`: an already-loaded `CLIPTextBackbone` to use with cond_type="clip"
+        (default: load `cfg.clip_model` once via `load_clip_backbone`, reused per process)."""
         super().__init__()
         self.cfg = cfg
-        # One trainable encoder per stage so stages can be trained independently.
-        # A frozen pretrained encoder (CLIP/T5) could be shared across stages.
-        self.encoders = nn.ModuleList(build_encoder(cfg.cond_type, cfg.cond_dim, cfg.num_classes)
+        # One encoder per stage so stages can be trained independently. With CLIP the
+        # frozen backbone is loaded ONCE and shared; each stage only owns a small adapter.
+        backbone = None
+        if cfg.cond_type == "clip":
+            backbone = text_backbone if text_backbone is not None else load_clip_backbone(cfg.clip_model)
+        self.text_backbone = backbone  # plain attribute (not a module): never in parameters()/state_dict()
+        self.encoders = nn.ModuleList(build_encoder(cfg.cond_type, cfg.cond_dim, cfg.num_classes, backbone=backbone)
                                       for _ in cfg.stages)
         self.diffusion = Diffusion(cfg.timesteps, cfg.beta_start, cfg.beta_end)
         nets = []
@@ -70,14 +77,14 @@ class Cascade(nn.Module):
           1. `stage_prompts` has an entry for stage k+1      -> use it;
           2. else the base `prompt` (str or list of B str)    -> use it (text only);
           3. else `labels`: label mode -> the labels, text mode -> labels_to_prompts(labels).
-        Returns a LongTensor of B labels ("label") or a list of B strings ("text").
+        Returns a LongTensor of B labels ("label") or a list of B strings ("text"/"clip").
         """
         ct = self.cfg.cond_type
         device = next(self.encoders[k].parameters()).device
         batch = self._batch_size(labels, prompt, stage_prompts, batch)
         if ct == "label" and prompt is not None:
-            raise TypeError("label conditioning cannot take a text prompt; use cond_type='text' "
-                            "(train.py/sample.py: --cond text)")
+            raise TypeError("label conditioning cannot take a text prompt; use cond_type='clip' or 'text' "
+                            "(train.py/sample.py: --cond clip, or the offline stub --cond text)")
         override = normalize_stage_prompts(stage_prompts, len(self.cfg.stages))[k]
         if override is not None:
             return broadcast_cond(override, batch, ct, device)

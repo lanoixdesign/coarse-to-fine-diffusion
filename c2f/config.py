@@ -7,7 +7,7 @@ Stage 1 is luminance-only; chroma channels appear in later stages.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 ALL_CHANNELS = ("Y", "Cb", "Cr")
 
@@ -40,7 +40,10 @@ class CascadeConfig:
     beta_start: float = 1e-4
     beta_end: float = 0.02
     # Text / label conditioning
-    cond_type: str = "label"   # "label" | "text"
+    cond_type: str = "label"   # "label" | "text" (hashed stub) | "clip" (frozen CLIP + per-stage adapters)
+    # Hugging Face model id or local path of the CLIP text model (cond_type="clip" only;
+    # None = c2f.text.DEFAULT_CLIP_MODEL). Recorded in checkpoints via to_dict().
+    clip_model: Optional[str] = None
     cond_dim: int = 128
     num_classes: int = 10
     # Probability of dropping the condition during training (enables
