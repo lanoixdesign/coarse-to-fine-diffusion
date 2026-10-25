@@ -25,6 +25,7 @@ from torchvision.utils import make_grid
 
 from c2f import Cascade, CascadeConfig, stage_state_from_checkpoint, ycbcr_to_rgb
 from c2f.cascade import to_ycbcr3
+from c2f.config import DEFAULT_GUIDANCE
 from c2f.color import from_model_range
 
 
@@ -43,10 +44,24 @@ def font(size):
     return ImageFont.load_default()
 
 
+def guidance_scales(args):
+    """Per-stage CFG scales: --guidance-sK > --guidance > DEFAULT_GUIDANCE[K-1]."""
+    return [getattr(args, f"guidance_s{s}") if getattr(args, f"guidance_s{s}") is not None
+            else (args.guidance if args.guidance is not None else DEFAULT_GUIDANCE[s - 1]) for s in (1, 2, 3)]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt-dir", default="checkpoints")
     ap.add_argument("--steps", type=int, default=50, help="DDIM steps per stage")
+    ap.add_argument("--guidance", type=float, default=None,
+                    help="classifier-free guidance scale for every stage (1 = off). "
+                         "Default: c2f.config.DEFAULT_GUIDANCE per stage")
+    ap.add_argument("--no-rederive-eps", action="store_true",
+                    help="original DDIM update (eps not recomputed after the x0 clamp); "
+                         "default: recompute it, which guidance needs")
+    for s in (1, 2, 3):
+        ap.add_argument(f"--guidance-s{s}", type=float, default=None, help=f"guidance scale for stage {s} only")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--n", type=int, default=64, help="number of samples (8x8 grid)")
     ap.add_argument("--nrow", type=int, default=8)
@@ -73,8 +88,10 @@ def main():
 
     labels = torch.arange(args.n) % 10
     t0 = time.time()
-    outs = model.sample(labels, steps=args.steps)  # one sequential chain: [16x16 Y, 32x32 YCbCr, 64x64 YCbCr]
-    print(f"sampled {args.n} x {len(outs)} stages, {args.steps} DDIM steps/stage, seed {args.seed}: {time.time() - t0:.1f}s")
+    gs = guidance_scales(args)
+    print("guidance scales per stage:", gs)
+    outs = model.sample(labels, steps=args.steps, guidance_scale=gs, rederive_eps=not args.no_rederive_eps)  # one sequential chain: [16x16 Y, 32x32 YCbCr, 64x64 YCbCr]
+    print(f"sampled {args.n} x {len(outs)} stages, {args.steps} DDIM steps/stage, guidance {gs}, seed {args.seed}: {time.time() - t0:.1f}s")
     rgbs = [to_rgb(x, s.channels) for x, s in zip(outs, cfg.stages)]
 
     # 1. main grid of final outputs

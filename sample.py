@@ -32,8 +32,15 @@ from c2f import (CLIPUnavailableError, Cascade, CascadeConfig, format_prompt, lo
                  stage_state_from_checkpoint, ycbcr_to_rgb)
 from c2f.text import DEFAULT_CLIP_MODEL
 from c2f.cascade import to_ycbcr3
+from c2f.config import DEFAULT_GUIDANCE
 from c2f.color import from_model_range
 from c2f.data import COLOR_NAMES
+
+
+def guidance_scales(args):
+    """Per-stage CFG scales: --guidance-sK > --guidance > DEFAULT_GUIDANCE[K-1]."""
+    return [getattr(args, f"guidance_s{s}") if getattr(args, f"guidance_s{s}") is not None
+            else (args.guidance if args.guidance is not None else DEFAULT_GUIDANCE[s - 1]) for s in (1, 2, 3)]
 
 
 def main():
@@ -47,6 +54,14 @@ def main():
     ap.add_argument("--num-samples", type=int, default=4,
                     help="number of samples when prompts are given without --labels")
     ap.add_argument("--steps", type=int, default=50, help="DDIM steps per stage")
+    ap.add_argument("--guidance", type=float, default=None,
+                    help="classifier-free guidance scale for every stage (1 = off). "
+                         "Default: c2f.config.DEFAULT_GUIDANCE per stage")
+    ap.add_argument("--no-rederive-eps", action="store_true",
+                    help="original DDIM update (eps not recomputed after the x0 clamp); "
+                         "default: recompute it, which guidance needs")
+    for s in (1, 2, 3):
+        ap.add_argument(f"--guidance-s{s}", type=float, default=None, help=f"guidance scale for stage {s} only")
     ap.add_argument("--out", default="samples.png")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--clip-model", default=None,
@@ -114,7 +129,9 @@ def main():
     if any_prompt:
         for k, c in enumerate(model.stage_conditions(labels, prompt, stage_prompts, batch=batch, upto=n)):
             print(f"stage {k + 1} prompt: {c[0]!r}" + (" ..." if len(set(c)) > 1 else ""))
-    outs = model.sample(labels, steps=args.steps, upto=n, prompt=prompt, stage_prompts=stage_prompts,
+    gs = guidance_scales(args)
+    print("guidance scales per stage:", gs[:n])
+    outs = model.sample(labels, steps=args.steps, upto=n, prompt=prompt, stage_prompts=stage_prompts, guidance_scale=gs, rederive_eps=not args.no_rederive_eps,
                         num_samples=batch)
 
     # One row per stage, all shown at the final resolution (nearest upsampling).
