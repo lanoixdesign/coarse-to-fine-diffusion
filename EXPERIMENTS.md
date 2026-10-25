@@ -54,3 +54,18 @@ Only record what was actually run and observed. No numbers that were not measure
   - Observed CLIP cosine similarities (L2-normalised `text_embeds`): "a photo of a red car" vs "a picture of a red automobile" 0.97, vs "a bowl of soup" 0.68; automobile vs soup 0.71.
   - Older label/stub checkpoints (written by the previous code) load and sample with the new `sample.py`.
 - Next steps: an actual training run with `--cond clip` and per-stage prompts, compared against `--cond label`.
+
+## 2026-10-25 — First real samples: label-conditioned cascade, 2000 steps/stage
+
+- Stage(s): full cascade sampling only (no training in this entry).
+- Checkpoints: `--cond label`, `default_config()`, about 690k-parameter UNets per stage, 2000 steps per stage (batch 64, lr 2e-4, seed 0). Stage 1 used gray MNIST. Stages 2 and 3 used `--color` (synthetic-colourised MNIST). Final training loss averaged over the last 100 steps: 0.039 / 0.0125 / 0.0085 (stages 1/2/3; different targets, not comparable).
+- Command: `OMP_NUM_THREADS=8 python make_grid.py --ckpt-dir checkpoints --steps 100 --seed 0 --out-dir docs/samples`. DDIM eta = 0, 100 steps per stage, no guidance, 64 samples with labels `i % 10`. The first 10 samples (labels 0..9) are reused for the progressive figure, so all stages come from the same chain.
+- Hardware / time: CPU, 8 threads. About 35 s of sampling (64 samples x 3 stages), about 38 s wall time.
+- Samples: `docs/samples/grid_64x64_8x8.png` (8x8 final 64x64), `docs/samples/progressive_stages.png` (rows = stage 1/2/3, nearest upsampled). Details in `docs/samples/README.md`.
+- Observations (by eye, no metrics):
+  - **Digit identity is weak.** Every sample is a stroke-like, digit-ish shape on a background, but most do not read as the conditioned digit. By a rough count, about 8–10 of the 64 clearly look like the correct label (several 1s, 5s, 0s, a 6, 7s and a 9), and roughly another 8 are borderline. The rest are wrong, ambiguous or broken into disconnected stroke fragments. Label conditioning is visibly only partly learned after 2000 steps.
+  - **Stage 1 (16x16 gray)** gives clean black backgrounds with blocky white strokes, so it is the least noisy stage. Its shapes are already wrong for most labels (in the progressive figure, the 0 looks like "b"/"6", the 1 is two dashes, the 4 is an arch). Only the 3 and the 9 are roughly plausible.
+  - **Stages 2/3 follow stage 1's shape closely.** They mostly keep the layout and smooth/thicken the strokes. They do not fix wrong shapes, and sometimes they lose thin parts (e.g. the 5's top stroke fades away, leaving two blobs). So they neither clearly refine nor badly corrupt the structure. They mostly copy it, plus noise.
+  - **Colour is not plausible relative to the training data.** Training digits have one fixed colour per class on a near-black background. Instead, the samples have a noisy mid-grey/greenish background (dark-green speckle at stage 2, grey speckle at stage 3) and multicoloured strokes, often pink, green and yellow within the same digit. The colour does not reliably match the class palette (e.g. label 5 should be blue and comes out pink/green). The chroma stages have not converged.
+  - **Noise:** strong per-pixel colour speckle at stages 2 and 3, in the background and on the strokes. Stage 3 is grainy rather than blocky. Stage 1 is visibly blocky (16x16), as expected.
+- Next steps: train longer (stage 1 first, since stage 1 sets the shape and the later stages copy it); add classifier-free guidance; check stage 2/3 on ground-truth low-res inputs to separate their errors from stage 1's; compare against gray-only stages 2/3.
