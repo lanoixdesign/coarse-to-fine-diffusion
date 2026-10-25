@@ -13,6 +13,8 @@ PALETTE = torch.tensor([
     [0.90, 0.10, 0.10], [0.95, 0.55, 0.05], [0.95, 0.90, 0.10], [0.20, 0.80, 0.20], [0.10, 0.70, 0.70],
     [0.15, 0.35, 0.95], [0.55, 0.20, 0.90], [0.95, 0.30, 0.70], [0.55, 0.35, 0.15], [0.90, 0.90, 0.90],
 ])
+# Human-readable name of each PALETTE entry (for `{color}` in prompt templates).
+COLOR_NAMES = ["red", "orange", "yellow", "green", "teal", "blue", "purple", "pink", "brown", "white"]
 
 
 class C2FMNIST(Dataset):
