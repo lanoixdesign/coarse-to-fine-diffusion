@@ -43,3 +43,14 @@ Only record what was actually run and observed. No numbers that were not measure
   - `pytest -q tests`: 16 passed (4 existing + 12 new in `tests/test_stage_prompts.py`).
   - The README smoke test (`train.py --stage {1,2,3} --steps 20 --batch-size 16 --subset 512 --color`, then `sample.py --steps 5 --labels 0 1 2 3`) gives loss histories identical to the previous code, and the sample PNG is byte-identical. `--cond text` without prompt flags is identical to the previous code too.
   - Text mode with per-stage prompt templates (20 steps per stage), then `sample.py --steps 5` with `--prompt` plus `--prompt-s2/--prompt-s3`. It runs end to end. A base prompt alone gives a PNG byte-identical to the same prompt passed to every stage.
+
+## 2026-10-25 — CLIP text encoder (encoder/interface change, plumbing smoke test only)
+
+- What: new `--cond clip` mode (`c2f.text.CLIPTextEncoder`). A frozen `openai/clip-vit-base-patch32` text tower (`CLIPTextModelWithProjection`, L2-normalised projected `text_embeds`, 512-d) is loaded **once** and shared by all stages. Each stage gets its own trainable `LayerNorm(512) -> Linear(512, 128)` adapter. The null embedding is CLIP(`""`) mapped by the stage adapter. Features are cached per unique prompt string. Checkpoints record the encoder type and model id, and store adapters only (no CLIP weights, about 3 MB per stage). `--cond text` (hashed stub) and `--cond label` are unchanged. See README "CLIP text encoder".
+- This is an **encoder/interface change only**. Nothing was trained with CLIP beyond a few steps, and there are **no quality claims**.
+- Checks run (CPU, `OMP_NUM_THREADS=2`, Python 3.13, torch 2.14.1+cpu, transformers 5.20.2; also tests with transformers 4.46.3):
+  - `pytest -q tests`: 27 passed (16 existing + 11 new in `tests/test_clip.py`). With `HF_HUB_OFFLINE=1` and an empty HF cache (what CI does): 19 passed, 8 skipped (the CLIP-model tests, with a reason).
+  - Smoke test (temporary checkpoint dir, 64-image `--color` subset, batch 16): `train.py --stage {1,2,3} --steps 5 --cond clip` with per-stage prompt templates, then `sample.py --steps 3` with `--prompt` / `--prompt-s2` / `--prompt-s3`, and with `--labels 0 1 2 3`. All commands completed and checkpoints saved and reloaded. Each stage used 11 CLIP forward passes in total (10 digit prompts + `""`) thanks to the cache. Printed losses over 5 steps (stage 1: 1.02 → 0.64, stage 2: 1.22 → 0.96, stage 3: 1.11 → 0.96) only show that gradients flow. The samples are noise, as expected.
+  - Observed CLIP cosine similarities (L2-normalised `text_embeds`): "a photo of a red car" vs "a picture of a red automobile" 0.97, vs "a bowl of soup" 0.68; automobile vs soup 0.71.
+  - Older label/stub checkpoints (written by the previous code) load and sample with the new `sample.py`.
+- Next steps: an actual training run with `--cond clip` and per-stage prompts, compared against `--cond label`.

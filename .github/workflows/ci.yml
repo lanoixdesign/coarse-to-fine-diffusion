@@ -6,6 +6,11 @@ on:
 jobs:
   shape-tests:
     runs-on: ubuntu-latest
+    env:
+      # Offline-safe: never download the CLIP model in CI. Tests that need the
+      # pretrained weights (tests/test_clip.py) skip with a reason; the rest,
+      # including the CLIP error-message tests, run with the stub/label encoders.
+      HF_HUB_OFFLINE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -14,6 +19,6 @@ jobs:
       - name: Install CPU torch
         run: |
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip install pytest
+          pip install pytest "transformers>=4.46"
       - name: Shape tests
-        run: pytest -q tests
+        run: pytest -q -rs tests
