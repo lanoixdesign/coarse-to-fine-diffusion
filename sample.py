@@ -14,6 +14,11 @@ model is loaded on startup (--clip-model overrides the id, e.g. a local path):
 Fallback: stage K uses --prompt-sK, else --prompt, else the label-derived
 prompt "a handwritten digit {digit}" for each --labels entry (old behaviour).
 With --labels, prompts may use the placeholders {digit}, {label} and {color}.
+
+EMA weights (checkpoints trained with --ema-decay > 0 store them under "ema_state"):
+by default each stage uses its EMA weights if its checkpoint has them, else the raw
+weights (old checkpoints sample exactly as before). --use-ema requires EMA weights
+for every loaded stage; --no-ema always uses the raw weights.
 """
 import argparse
 import os
@@ -23,7 +28,8 @@ import torch
 import torch.nn.functional as F
 from torchvision.utils import save_image
 
-from c2f import CLIPUnavailableError, Cascade, CascadeConfig, format_prompt, load_clip_backbone, ycbcr_to_rgb
+from c2f import (CLIPUnavailableError, Cascade, CascadeConfig, format_prompt, load_clip_backbone,
+                 stage_state_from_checkpoint, ycbcr_to_rgb)
 from c2f.text import DEFAULT_CLIP_MODEL
 from c2f.cascade import to_ycbcr3
 from c2f.color import from_model_range
@@ -46,6 +52,12 @@ def main():
     ap.add_argument("--clip-model", default=None,
                     help="override the CLIP model id/path stored in the checkpoint (--cond clip checkpoints), "
                          "e.g. a local directory for offline use")
+    ema = ap.add_mutually_exclusive_group()
+    ema.add_argument("--use-ema", dest="use_ema", action="store_const", const=True, default=None,
+                     help="sample with the EMA weights (error if a checkpoint has none). "
+                          "Default: EMA weights when the checkpoint has them, else raw weights")
+    ema.add_argument("--no-ema", dest="use_ema", action="store_const", const=False,
+                     help="sample with the raw (non-EMA) weights")
     args = ap.parse_args()
 
     stage_args = {s: getattr(args, f"prompt_s{s}") for s in (1, 2, 3)}
@@ -77,7 +89,12 @@ def main():
         path = os.path.join(args.ckpt_dir, f"stage{k + 1}.pt")
         if not os.path.exists(path):
             break
-        model.load_stage_state(k, torch.load(path, map_location="cpu")["state"])
+        try:
+            state, used_ema = stage_state_from_checkpoint(torch.load(path, map_location="cpu"), args.use_ema)
+        except KeyError as e:
+            sys.exit(f"error: {path}: {e.args[0]}")
+        model.load_stage_state(k, state)
+        print(f"stage {k + 1}: {'EMA' if used_ema else 'raw'} weights")
         n = k + 1
     print(f"loaded {n} stage(s)")
     model.eval()

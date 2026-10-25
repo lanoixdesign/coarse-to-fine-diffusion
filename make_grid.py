@@ -9,6 +9,9 @@
    `Cascade.sample` call that produced the stage-3 images (stage k+1 conditions on them),
    not independent runs.
 
+EMA: like sample.py, each stage uses its EMA weights if the checkpoint has them
+(--no-ema forces the raw weights; --use-ema requires EMA weights).
+
 Label-conditioned checkpoints only (prompts are not exposed here; use sample.py for those).
 """
 import argparse
@@ -20,7 +23,7 @@ import torch.nn.functional as F
 from PIL import Image, ImageDraw, ImageFont
 from torchvision.utils import make_grid
 
-from c2f import Cascade, CascadeConfig, ycbcr_to_rgb
+from c2f import Cascade, CascadeConfig, stage_state_from_checkpoint, ycbcr_to_rgb
 from c2f.cascade import to_ycbcr3
 from c2f.color import from_model_range
 
@@ -49,6 +52,10 @@ def main():
     ap.add_argument("--nrow", type=int, default=8)
     ap.add_argument("--display", type=int, default=128, help="tile size in the progressive figure")
     ap.add_argument("--out-dir", default="docs/samples")
+    ema = ap.add_mutually_exclusive_group()
+    ema.add_argument("--use-ema", dest="use_ema", action="store_const", const=True, default=None,
+                     help="EMA weights (error if absent); default: EMA if present, else raw")
+    ema.add_argument("--no-ema", dest="use_ema", action="store_const", const=False, help="raw weights")
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -58,7 +65,10 @@ def main():
     assert cfg.cond_type == "label", "make_grid.py is for label-conditioned checkpoints"
     model = Cascade(cfg)
     for k in range(len(cfg.stages)):
-        model.load_stage_state(k, torch.load(os.path.join(args.ckpt_dir, f"stage{k + 1}.pt"), map_location="cpu")["state"])
+        state, used_ema = stage_state_from_checkpoint(
+            torch.load(os.path.join(args.ckpt_dir, f"stage{k + 1}.pt"), map_location="cpu"), args.use_ema)
+        model.load_stage_state(k, state)
+        print(f"stage {k + 1}: {'EMA' if used_ema else 'raw'} weights")
     model.eval()
 
     labels = torch.arange(args.n) % 10
