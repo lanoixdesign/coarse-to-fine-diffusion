@@ -62,6 +62,12 @@ class CascadeConfig:
         return CascadeConfig(stages=stages, **d)
 
 
+# Default classifier-free guidance scale per stage used by sample.py / make_grid.py
+# (1.0 = no guidance). Stage 1: chosen by the guidance sweep in EXPERIMENTS.md
+# (tools/cfg_eval.py). Stages 2/3: not tuned yet, so no guidance.
+DEFAULT_GUIDANCE = (1.5, 1.0, 1.0)
+
+
 def default_config() -> CascadeConfig:
     """16x16 gray -> 32x32 gray refinement + coarse chroma -> 64x64 full chroma."""
     return CascadeConfig(stages=[

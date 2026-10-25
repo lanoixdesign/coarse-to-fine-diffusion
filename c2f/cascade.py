@@ -47,6 +47,16 @@ def stage_target(ycc: torch.Tensor, stage: StageConfig) -> torch.Tensor:
     return x
 
 
+def stage_guidance(guidance_scale, n: int) -> List[float]:
+    """Expand a CFG scale (float, or sequence with one value per stage) to n floats."""
+    if isinstance(guidance_scale, (int, float)):
+        return [float(guidance_scale)] * n
+    g = [float(v) for v in guidance_scale]
+    if len(g) < n:
+        raise ValueError(f"need {n} guidance scales, got {len(g)}")
+    return g[:n]
+
+
 class Cascade(nn.Module):
     def __init__(self, cfg: CascadeConfig, text_backbone=None):
         """`text_backbone`: an already-loaded `CLIPTextBackbone` to use with cond_type="clip"
@@ -148,8 +158,12 @@ class Cascade(nn.Module):
 
     # ---- training -----------------------------------------------------
     def stage_loss(self, k: int, ycc_full: torch.Tensor, labels: Optional[torch.Tensor] = None,
-                   prompt=None, stage_prompts=None) -> torch.Tensor:
+                   prompt=None, stage_prompts=None, cond_source: Optional[torch.Tensor] = None) -> torch.Tensor:
         """ycc_full: (B,3,H,W) YCbCr in [-1,1] at any res >= stage res.
+
+        `cond_source` (stage k > 0 only): full YCbCr image the conditioning (previous-stage
+        target) is derived from instead of `ycc_full`, e.g. the grayscale rendering of the
+        same digit when stage 1 was trained on grayscale data. Default: `ycc_full`.
 
         Conditioning: stage k uses `stage_prompts[k+1]` if given, else `prompt`,
         else `labels` (see `stage_condition`). `stage_loss(k, x, labels)` is the
@@ -161,7 +175,8 @@ class Cascade(nn.Module):
         cond_img = None
         if k > 0:
             p = self.cfg.stages[k - 1]
-            x_prev = stage_target(F.interpolate(ycc_full, size=(p.resolution,) * 2, mode="area"), p)
+            src = ycc_full if cond_source is None else cond_source
+            x_prev = stage_target(F.interpolate(src, size=(p.resolution,) * 2, mode="area"), p)
             cond_img = build_condition(x_prev, s.resolution)
             if s.cond_noise_std > 0:
                 cond_img = cond_img + s.cond_noise_std * torch.randn_like(cond_img)
@@ -172,8 +187,15 @@ class Cascade(nn.Module):
     # ---- sampling -----------------------------------------------------
     @torch.no_grad()
     def sample(self, labels: Optional[torch.Tensor] = None, steps: int = 50, upto: Optional[int] = None,
-               prompt=None, stage_prompts=None, num_samples: Optional[int] = None) -> List[torch.Tensor]:
+               prompt=None, stage_prompts=None, num_samples: Optional[int] = None,
+               guidance_scale=1.0, rederive_eps: bool = True) -> List[torch.Tensor]:
         """Run the cascade; returns per-stage outputs in [-1,1] (stage channels only).
+
+        `guidance_scale`: classifier-free guidance weight, one float for every stage or a
+        per-stage sequence (1.0 = no guidance, the previous behaviour).
+        `rederive_eps` (default True): recompute eps from the clamped x0 at every DDIM step
+        (see `Diffusion.sample`); required for guidance to work here, and slightly better
+        without guidance too (EXPERIMENTS.md). False = the original sampler.
 
         `sample(labels)` is the original call. With text conditioning, `prompt`
         is the base prompt for every stage and `stage_prompts` (dict keyed 1..n,
@@ -185,12 +207,15 @@ class Cascade(nn.Module):
         b = self._batch_size(labels, prompt, stage_prompts, num_samples)
         outs, prev = [], None
         n = len(self.stages) if upto is None else upto
+        scales = stage_guidance(guidance_scale, n)
         for k in range(n):
             s = self.cfg.stages[k]
             emb = self.encode_stage(k, labels, prompt, stage_prompts, batch=b)
+            null = self.null_embedding(k, b, device) if scales[k] != 1.0 else None
             cond_img = None if prev is None else build_condition(prev, s.resolution)
             x = self.diffusion.sample(self.stages[k], (b, s.n_out, s.resolution, s.resolution),
-                                      cond_img, emb, steps=steps, device=device)
+                                      cond_img, emb, steps=steps, device=device,
+                                      guidance_scale=scales[k], null_emb=null, rederive_eps=rederive_eps)
             outs.append(x)
             prev = x
         return outs

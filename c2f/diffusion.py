@@ -38,17 +38,40 @@ class Diffusion:
 
     @torch.no_grad()
     def sample(self, model: Callable, shape, cond_img: Optional[torch.Tensor], cond_emb: torch.Tensor,
-               steps: int = 50, device="cpu") -> torch.Tensor:
-        """Deterministic DDIM (eta=0) over `steps` evenly spaced timesteps."""
+               steps: int = 50, device="cpu", guidance_scale: float = 1.0,
+               null_emb: Optional[torch.Tensor] = None, rederive_eps: bool = False) -> torch.Tensor:
+        """Deterministic DDIM (eta=0) over `steps` evenly spaced timesteps.
+
+        Classifier-free guidance (Ho & Salimans 2022): with `guidance_scale` w != 1 and
+        the unconditional embedding `null_emb`, the noise estimate is
+        eps_u + w * (eps_c - eps_u). w = 1 is the plain conditional model (no extra
+        forward pass, identical to the previous sampler); w = 0 is unconditional.
+        Only meaningful for models trained with condition dropout (cond_drop_prob > 0).
+
+        `rederive_eps=True`: after clamping the predicted x0 to [-1, 1], recompute eps from
+        the clamped x0 (eps = (x_t - sqrt(ab) x0) / sqrt(1 - ab), as GLIDE / diffusers' DDIM
+        do), so the DDIM direction term stays consistent with x0. Default False = the
+        previous sampler (eps from the network, unchanged by the clamp).
+        """
+        guided = guidance_scale != 1.0
+        if guided and null_emb is None:
+            raise ValueError("guidance_scale != 1 needs null_emb (the unconditional embedding)")
         x = torch.randn(shape, device=device)
         ts = torch.linspace(self.T - 1, 0, steps, device=device).long()
         ac = self.alphas_cumprod.to(device)
         for i, t in enumerate(ts):
             tt = torch.full((shape[0],), int(t), device=device, dtype=torch.long)
             inp = x if cond_img is None else torch.cat([x, cond_img], dim=1)
-            eps = model(inp, tt, cond_emb)
+            if guided:  # one batched forward pass for the conditional and unconditional branch
+                e = model(torch.cat([inp, inp]), torch.cat([tt, tt]), torch.cat([cond_emb, null_emb]))
+                eps_c, eps_u = e.chunk(2)
+                eps = eps_u + guidance_scale * (eps_c - eps_u)
+            else:
+                eps = model(inp, tt, cond_emb)
             ab = ac[t]
             x0 = ((x - (1 - ab).sqrt() * eps) / ab.sqrt()).clamp(-1, 1)
+            if rederive_eps:
+                eps = (x - ab.sqrt() * x0) / (1 - ab).sqrt()
             ab_prev = ac[ts[i + 1]] if i + 1 < len(ts) else torch.tensor(1.0, device=device)
             x = ab_prev.sqrt() * x0 + (1 - ab_prev).sqrt() * eps
         return x
